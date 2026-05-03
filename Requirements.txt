@@ -1,0 +1,5 @@
+matplotlib
+streamlit
+pymysql
+pandas
+plotly
