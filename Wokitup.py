@@ -350,19 +350,38 @@ GROUP BY DAYNAME(business_date), WEEKDAY(business_date)
 ORDER BY weekday_order;
 """
 
+EXPENSES_SQL = f"""
+SELECT 
+    e.id,
+    date(e.expense_datee) AS expense_date,
+    e.amount,
+    ec.name AS category
+FROM (select *,CASE
+            WHEN TIME(created_at) >= '14:00:00'
+                THEN DATE(created_at)
+            WHEN TIME(created_at) < '04:00:00'
+                THEN DATE(created_at) - INTERVAL 1 DAY
+            ELSE DATE(created_at)
+        END AS expense_datee from expenses) e
+LEFT JOIN expense_categories ec ON ec.id = e.expense_category_id
+WHERE DATE(e.expense_date) BETWEEN '{START}' AND '{END}'
+ORDER BY e.expense_date;
+"""
+
 # ─── Load Data ────────────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
-    df_daily   = run_query(DAILY_SALES_SQL)
-    df_product = run_query(PRODUCT_SQL)
-    df_mom     = run_query(MOM_CATEGORY_SQL)
-    df_period  = run_query(PERIOD_SQL)
-    df_day     = run_query(DAYWISE_SQL)
-    df_aov_m   = run_query(AOV_MONTHLY_SQL)
-    df_aov_w   = run_query(AOV_WEEKDAY_SQL)
+    df_daily    = run_query(DAILY_SALES_SQL)
+    df_product  = run_query(PRODUCT_SQL)
+    df_mom      = run_query(MOM_CATEGORY_SQL)
+    df_period   = run_query(PERIOD_SQL)
+    df_day      = run_query(DAYWISE_SQL)
+    df_aov_m    = run_query(AOV_MONTHLY_SQL)
+    df_aov_w    = run_query(AOV_WEEKDAY_SQL)
+    df_expenses = run_query(EXPENSES_SQL)
 
 # ─── TABS ─────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📅 Daily Sales", "🛍️ Products", "📊 MoM Trends", "📈 AOV", "🗓️ Patterns"
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📅 Daily Sales", "🛍️ Products", "📊 MoM Trends", "📈 AOV", "🗓️ Patterns", "💸 Expenses"
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -383,12 +402,28 @@ with tab1:
         lm_rev    = df_daily["last_month_same_day_sales"].sum()
         delta_pct = ((total_rev - lm_rev) / lm_rev * 100) if lm_rev else 0
 
-        c1, c2, c3, c4 = st.columns(4)
+        # ── Prepare daily expenses lookup keyed by business_date ──────────────
+        daily_exp_map = {}
+        if not df_expenses.empty:
+            df_expenses["amount"] = pd.to_numeric(df_expenses["amount"], errors="coerce").fillna(0)
+            df_expenses["expense_date"] = pd.to_datetime(df_expenses["expense_date"])
+            daily_exp_map = (
+                df_expenses.groupby("expense_date")["amount"]
+                .sum()
+                .to_dict()
+            )
+
+        total_exp  = df_expenses["amount"].sum() if not df_expenses.empty else 0
+        net_profit = total_rev - total_exp
+
+        # ── KPI Cards ─────────────────────────────────────────────────────────
+        c1, c2, c3, c4, c5 = st.columns(5)
         for col, label, value, delta in [
             (c1, "Total Revenue",   f"PKR {total_rev:,.0f}", f"{delta_pct:+.1f}% vs last month"),
             (c2, "Total Orders",    f"{int(total_ord):,}", ""),
             (c3, "Avg Order Value", f"PKR {avg_ord:,.0f}", ""),
-            (c4, "Days Tracked",    f"{len(df_daily)}", ""),
+            (c4, "Total Expenses",  f"PKR {total_exp:,.0f}", ""),
+            (c5, "Net Profit",      f"PKR {net_profit:,.0f}", ""),
         ]:
             dclass = "delta-pos" if "+" in delta else "delta-neg" if delta.startswith("-") else ""
             col.markdown(f"""<div class="metric-card">
@@ -400,7 +435,9 @@ with tab1:
         st.markdown("<div class='section-title'>Daily Revenue vs Last Month Same Day</div>", unsafe_allow_html=True)
         fig = go.Figure()
         fig.add_trace(go.Bar(x=df_daily["business_date"], y=df_daily["total_amount"],
-                             name="This Period", marker_color=PALETTE[0], opacity=0.9))
+                             name="This Period", marker_color=PALETTE[0], opacity=0.9,
+                             text=df_daily["total_amount"], texttemplate="%{text:,.0f}",
+                             textposition="outside", textfont=dict(size=10)))
         fig.add_trace(go.Scatter(x=df_daily["business_date"], y=df_daily["last_month_same_day_sales"],
                                  name="Last Month Same Day", mode="lines+markers",
                                  line=dict(color=PALETTE[2], width=2, dash="dot"), marker=dict(size=6)))
@@ -424,18 +461,37 @@ with tab1:
                                       ("dinein",   PALETTE[1], "Dine-In"),
                                       ("take_away",PALETTE[2], "Take-Away")]:
                 fig_bar.add_trace(go.Bar(x=df_daily["business_date"], y=df_daily[cn],
-                                         name=label, marker_color=color))
+                                         name=label, marker_color=color,
+                                         text=df_daily[cn], texttemplate="%{text:,.0f}",
+                                         textposition="inside", textfont=dict(size=9)))
             fig_bar.update_layout(barmode="stack", title="Daily Breakdown by Type")
             st.plotly_chart(apply_theme(fig_bar), use_container_width=True)
 
+        # ── Daily Detail Table with Expenses column ───────────────────────────
         st.markdown("<div class='section-title'>Daily Detail Table</div>", unsafe_allow_html=True)
         disp = df_daily.copy()
+
+        # Map daily expenses onto each business_date row
+        disp["Expenses"] = disp["business_date"].map(daily_exp_map).fillna(0)
+        disp["Net Profit"] = disp["total_amount"] - disp["Expenses"]
+
         disp["business_date"] = disp["business_date"].dt.strftime("%d %b %Y")
-        disp.columns = ["Date","Orders","Revenue","Delivery","Dine-In","Take-Away",
-                        "First Order","Last Order","Last Month"]
+
+        # Reorder columns: Date, Orders, Revenue, Expenses, Net Profit, Delivery, Dine-In, Take-Away, First Order, Last Order, Last Month
+        disp = disp[["business_date","total_orders","total_amount","Expenses","Net Profit",
+                     "delivery","dinein","take_away","first_order_time","last_order_time",
+                     "last_month_same_day_sales"]]
+        disp.columns = ["Date","Orders","Revenue","Expenses","Net Profit",
+                        "Delivery","Dine-In","Take-Away","First Order","Last Order","Last Month"]
+
         st.dataframe(disp.style.format({
-            "Revenue":"PKR {:,.0f}","Delivery":"PKR {:,.0f}",
-            "Dine-In":"PKR {:,.0f}","Take-Away":"PKR {:,.0f}","Last Month":"PKR {:,.0f}"
+            "Revenue":    "PKR {:,.0f}",
+            "Expenses":   "PKR {:,.0f}",
+            "Net Profit": "PKR {:,.0f}",
+            "Delivery":   "PKR {:,.0f}",
+            "Dine-In":    "PKR {:,.0f}",
+            "Take-Away":  "PKR {:,.0f}",
+            "Last Month": "PKR {:,.0f}",
         }), use_container_width=True, hide_index=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -467,6 +523,7 @@ with tab2:
             fig = px.bar(df_p.nlargest(15, "Amount"), x="Amount", y="name", orientation="h",
                          color="Category", color_discrete_sequence=PALETTE,
                          labels={"Amount": "Revenue (PKR)", "name": ""})
+            fig.update_traces(texttemplate="%{x:,.0f}", textposition="outside", textfont=dict(size=10))
             fig.update_layout(title="Top 15 Products", yaxis=dict(autorange="reversed"))
             st.plotly_chart(apply_theme(fig), use_container_width=True)
         with col2:
@@ -482,7 +539,9 @@ with tab2:
         if not addon_df.empty:
             fig3 = px.bar(addon_df, x="name", y="AddonAmount",
                           color_discrete_sequence=[PALETTE[3]],
-                          labels={"AddonAmount": "Add-On Revenue (PKR)", "name": "Product"})
+                          labels={"AddonAmount": "Add-On Revenue (PKR)", "name": "Product"},
+                          text="AddonAmount")
+            fig3.update_traces(texttemplate="%{text:,.0f}", textposition="outside", textfont=dict(size=10))
             st.plotly_chart(apply_theme(fig3), use_container_width=True)
         else:
             st.info("No add-on revenue data for the selected range.")
@@ -532,7 +591,9 @@ with tab3:
         fig_sb = px.bar(df_m, x="month_label", y="category_sales", color="category",
                         barmode="stack", category_orders={"month_label": months_order},
                         color_discrete_sequence=PALETTE,
-                        labels={"category_sales": "Sales (PKR)", "month_label": "Month"})
+                        labels={"category_sales": "Sales (PKR)", "month_label": "Month"},
+                        text="category_sales")
+        fig_sb.update_traces(texttemplate="%{text:,.0f}", textposition="inside", textfont=dict(size=9))
         st.plotly_chart(apply_theme(fig_sb), use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -551,7 +612,9 @@ with tab4:
 
             fig = make_subplots(specs=[[{"secondary_y": True}]])
             fig.add_trace(go.Bar(x=df_aov_m["month_label"], y=df_aov_m["total_sales"],
-                                 name="Total Sales", marker_color=PALETTE[0], opacity=0.7), secondary_y=False)
+                                 name="Total Sales", marker_color=PALETTE[0], opacity=0.7,
+                                 text=df_aov_m["total_sales"], texttemplate="%{text:,.0f}",
+                                 textposition="outside", textfont=dict(size=10)), secondary_y=False)
             fig.add_trace(go.Scatter(x=df_aov_m["month_label"], y=df_aov_m["monthly_aov"],
                                      name="AOV", mode="lines+markers",
                                      line=dict(color=PALETTE[2], width=3), marker=dict(size=8)), secondary_y=True)
@@ -583,6 +646,7 @@ with tab4:
                           color="aov", color_continuous_scale="Purples",
                           labels={"weekday_name": "Day", "aov": "AOV (PKR)"},
                           category_orders={"weekday_name": day_order_list})
+            fig2.update_traces(texttemplate="%{y:,.0f}", textposition="outside", textfont=dict(size=10))
             fig2.update_coloraxes(showscale=False)
             fig2.update_layout(title="AOV by Day of Week")
             st.plotly_chart(apply_theme(fig2), use_container_width=True)
@@ -634,6 +698,7 @@ with tab5:
             fig2 = px.bar(avg_day, x="day_name", y="total_sales",
                           color="total_sales", color_continuous_scale="Purples",
                           labels={"day_name": "Day", "total_sales": "Avg Sales (PKR)"})
+            fig2.update_traces(texttemplate="%{y:,.0f}", textposition="outside", textfont=dict(size=10))
             fig2.update_coloraxes(showscale=False)
             st.plotly_chart(apply_theme(fig2), use_container_width=True)
 
@@ -652,6 +717,7 @@ with tab5:
                       category_orders={"month_label": months_sorted,
                                        "Period_Label": ["Days 1–10","Days 11–20","Days 21–End"]},
                       labels={"Amount": "Revenue (PKR)", "month_label": "Month", "Period_Label": "Period"})
+        fig3.update_traces(texttemplate="%{y:,.0f}", textposition="outside", textfont=dict(size=9))
         fig3.update_layout(title="Revenue by 10-Day Period per Month", legend=dict(orientation="h", y=1.1))
         st.plotly_chart(apply_theme(fig3), use_container_width=True)
 
@@ -661,5 +727,89 @@ with tab5:
         avail_months = [m for m in months_sorted if m in pivot_p.columns]
         if avail_months:
             pivot_p = pivot_p[avail_months]
-        st.dataframe(pivot_p.style.format("PKR {:,.0f}"),
-                     use_container_width=True)
+        st.dataframe(pivot_p.style.format("PKR {:,.0f}"), use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 · Expenses
+# ══════════════════════════════════════════════════════════════════════════════
+with tab6:
+    if df_expenses.empty:
+        st.info("No expenses data for the selected date range.")
+    else:
+        df_expenses["amount"] = pd.to_numeric(df_expenses["amount"], errors="coerce").fillna(0)
+        df_expenses["expense_date"] = pd.to_datetime(df_expenses["expense_date"])
+
+        total_exp     = df_expenses["amount"].sum()
+        num_entries   = len(df_expenses)
+        top_cat       = df_expenses.groupby("category")["amount"].sum().idxmax()
+        avg_daily_exp = df_expenses.groupby("expense_date")["amount"].sum().mean()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.markdown(f'''<div class="metric-card">
+            <div class="label">Total Expenses</div>
+            <div class="value">PKR {total_exp:,.0f}</div></div>''', unsafe_allow_html=True)
+        c2.markdown(f'''<div class="metric-card">
+            <div class="label">No. of Entries</div>
+            <div class="value">{num_entries}</div></div>''', unsafe_allow_html=True)
+        c3.markdown(f'''<div class="metric-card">
+            <div class="label">Top Category</div>
+            <div class="value" style="font-size:20px">{top_cat}</div></div>''', unsafe_allow_html=True)
+        c4.markdown(f'''<div class="metric-card">
+            <div class="label">Avg Daily Expense</div>
+            <div class="value">PKR {avg_daily_exp:,.0f}</div></div>''', unsafe_allow_html=True)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("<div class='section-title'>Expenses by Category</div>", unsafe_allow_html=True)
+            cat_grp = df_expenses.groupby("category")["amount"].sum().reset_index().sort_values("amount", ascending=False)
+            fig = px.pie(cat_grp, names="category", values="amount",
+                         color_discrete_sequence=PALETTE, hole=0.45)
+            fig.update_traces(textinfo="label+percent", textfont_size=13)
+            fig.update_layout(title="Expense Mix by Category", legend=dict(orientation="h", y=-0.1))
+            st.plotly_chart(apply_theme(fig), use_container_width=True)
+
+        with col2:
+            st.markdown("<div class='section-title'>Category Breakdown (Bar)</div>", unsafe_allow_html=True)
+            fig2 = px.bar(cat_grp, x="category", y="amount",
+                          color="category", color_discrete_sequence=PALETTE,
+                          labels={"amount": "Amount (PKR)", "category": "Category"})
+            fig2.update_traces(texttemplate="%{y:,.0f}", textposition="outside", textfont=dict(size=10))
+            fig2.update_layout(title="Expenses by Category", showlegend=False)
+            st.plotly_chart(apply_theme(fig2), use_container_width=True)
+
+        st.markdown("<div class='section-title'>Daily Expenses Over Time</div>", unsafe_allow_html=True)
+        daily_exp_df = df_expenses.groupby("expense_date")["amount"].sum().reset_index()
+        fig3 = go.Figure()
+        fig3.add_trace(go.Bar(x=daily_exp_df["expense_date"], y=daily_exp_df["amount"],
+                              marker_color=PALETTE[4], name="Daily Expenses", opacity=0.85,
+                              text=daily_exp_df["amount"], texttemplate="%{text:,.0f}",
+                              textposition="outside", textfont=dict(size=9)))
+        fig3.add_trace(go.Scatter(x=daily_exp_df["expense_date"],
+                                  y=daily_exp_df["amount"].rolling(7, min_periods=1).mean(),
+                                  name="7-Day Avg", mode="lines",
+                                  line=dict(color=PALETTE[2], width=2)))
+        fig3.update_layout(title="Daily Expenses + 7-Day Rolling Average",
+                           legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(apply_theme(fig3), use_container_width=True)
+
+        st.markdown("<div class='section-title'>Monthly Expenses by Category (Stacked)</div>", unsafe_allow_html=True)
+        df_expenses["month_label"] = df_expenses["expense_date"].apply(
+            lambda d: f"{calendar.month_abbr[d.month]} {d.year}")
+        monthly_cat = df_expenses.groupby(["month_label","category"])["amount"].sum().reset_index()
+        month_order = (df_expenses[["expense_date","month_label"]]
+                       .drop_duplicates().sort_values("expense_date")["month_label"].tolist())
+        fig4 = px.bar(monthly_cat, x="month_label", y="amount", color="category",
+                      barmode="stack", color_discrete_sequence=PALETTE,
+                      category_orders={"month_label": month_order},
+                      labels={"amount": "Amount (PKR)", "month_label": "Month", "category": "Category"})
+        fig4.update_traces(texttemplate="%{y:,.0f}", textposition="inside", textfont=dict(size=9))
+        fig4.update_layout(title="Monthly Expenses by Category", legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(apply_theme(fig4), use_container_width=True)
+
+        st.markdown("<div class='section-title'>Expense Entries</div>", unsafe_allow_html=True)
+        disp_exp = df_expenses[["expense_date","category","amount"]].copy()
+        disp_exp["expense_date"] = disp_exp["expense_date"].dt.strftime("%d %b %Y")
+        disp_exp.columns = ["Date","Category","Amount (PKR)"]
+        st.dataframe(disp_exp.sort_values("Date", ascending=False)
+                     .style.format({"Amount (PKR)": "PKR {:,.0f}"}),
+                     use_container_width=True, hide_index=True)
