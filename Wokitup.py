@@ -93,6 +93,52 @@ def run_query(sql: str) -> pd.DataFrame:
         st.error(f"DB Error: {e}")
         return pd.DataFrame()
 
+
+# ─── Login Screen ─────────────────────────────────────────────────────────────
+def check_login():
+    if st.session_state.get("authenticated"):
+        return True
+
+    # Centre the login card with columns
+    _, center, _ = st.columns([1, 1.2, 1])
+    with center:
+        st.markdown("""
+        <div style="
+            background: linear-gradient(135deg, #1e2130 0%, #252a3d 100%);
+            border: 1px solid #2d3550;
+            border-radius: 16px;
+            padding: 40px 36px 32px 36px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+            margin-top: 80px;
+        ">
+            <div style="text-align:center; margin-bottom:28px;">
+                <div style="font-size:48px; margin-bottom:8px;">🍽️</div>
+                <div style="font-size:22px; font-weight:700; color:#cdd6f4;">Restaurant Analytics</div>
+                <div style="font-size:13px; color:#8892b0; margin-top:4px;">Sign in to continue</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.form("login_form", clear_on_submit=False):
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            username = st.text_input("Username", placeholder="Enter username")
+            password = st.text_input("Password", type="password", placeholder="Enter password")
+            submitted = st.form_submit_button("Sign In", use_container_width=True)
+
+            if submitted:
+                creds = st.secrets.get("users", {})
+                if username in creds and creds[username] == password:
+                    st.session_state["authenticated"] = True
+                    st.session_state["username"] = username
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
+
+    return False
+
+if not check_login():
+    st.stop()
+
 # ─── Sidebar — Global Date Filter ─────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🍽️ Restaurant Analytics")
@@ -115,9 +161,20 @@ with st.sidebar:
     END   = end_date.strftime("%Y-%m-%d")
 
     st.markdown("---")
-    if st.button("🔄 Refresh Data", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+    st.markdown(
+        f"<small style='color:#8892b0'>👤 Signed in as <b>{st.session_state.get('username','')}</b></small>",
+        unsafe_allow_html=True
+    )
+    col_ref, col_out = st.columns(2)
+    with col_ref:
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+    with col_out:
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state["authenticated"] = False
+            st.session_state["username"] = ""
+            st.rerun()
 
     st.markdown("---")
     st.markdown(
