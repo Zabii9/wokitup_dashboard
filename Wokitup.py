@@ -425,6 +425,26 @@ WHERE DATE(e.expense_date) BETWEEN '{START}' AND '{END}'
 ORDER BY e.expense_date;
 """
 
+
+CHURNED_SQL = f"""
+SELECT 
+    u.id,
+    u.f_name,
+    u.phone,
+    COUNT(o.id) AS Orders,
+    SUM(o.order_amount) AS Amount,
+    DATEDIFF(NOW(), MAX(DATE(o.created_at))) AS LastOrder
+FROM users u
+LEFT JOIN orders o ON o.user_id = u.id
+WHERE u.user_type IS NULL
+  AND u.created_at >= '2025-08-30'
+  AND u.is_active = 1
+GROUP BY u.id, u.f_name, u.phone
+HAVING LastOrder >= {{last_order_days}}
+   AND SUM(o.order_amount) >= {{min_amount}}
+ORDER BY COUNT(o.id) DESC;
+"""
+
 # ─── Load Data ────────────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
     df_daily    = run_query(DAILY_SALES_SQL)
@@ -437,8 +457,8 @@ with st.spinner("Loading data…"):
     df_expenses = run_query(EXPENSES_SQL)
 
 # ─── TABS ─────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📅 Daily Sales", "🛍️ Products", "📊 MoM Trends", "📈 AOV", "🗓️ Patterns", "💸 Expenses"
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "📅 Daily Sales", "🛍️ Products", "📊 MoM Trends", "📈 AOV", "🗓️ Patterns", "💸 Expenses", "🔴 Churned Customers"
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -870,3 +890,139 @@ with tab6:
         st.dataframe(disp_exp.sort_values("Date", ascending=False)
                      .style.format({"Amount (PKR)": "PKR {:,.0f}"}),
                      use_container_width=True, hide_index=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 7 · Churned Customers
+# ══════════════════════════════════════════════════════════════════════════════
+with tab7:
+    st.markdown("<div class='section-title'>🔴 Churned Customer Filter</div>", unsafe_allow_html=True)
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        last_order_days = st.number_input(
+            "Inactive for at least (days)",
+            min_value=1, max_value=365, value=30, step=1,
+            help="Customers who haven't ordered in this many days"
+        )
+    with fc2:
+        min_amount = st.number_input(
+            "Minimum total order amount (PKR)",
+            min_value=0, max_value=500000, value=1500, step=100,
+            help="Only show customers whose total spend is at or above this"
+        )
+
+    run_churn = st.button("🔍 Find Churned Customers", use_container_width=True)
+
+    if run_churn:
+        churn_sql = f"""
+        SELECT 
+            u.id,
+            u.f_name        AS Name,
+            u.phone         AS Phone,
+            COUNT(o.id)     AS Orders,
+            SUM(o.order_amount)  AS Amount,
+            DATEDIFF(NOW(), MAX(DATE(o.created_at))) AS LastOrder
+        FROM users u
+        LEFT JOIN orders o ON o.user_id = u.id
+        WHERE u.user_type IS NULL
+          AND u.created_at >= '2025-08-30'
+          AND u.is_active = 1
+        GROUP BY u.id, u.f_name, u.phone
+        HAVING LastOrder >= {int(last_order_days)}
+           AND SUM(o.order_amount) >= {int(min_amount)}
+        ORDER BY COUNT(o.id) DESC;
+        """
+
+        with st.spinner("Fetching churned customers…"):
+            df_churn = run_query(churn_sql)
+
+        if df_churn.empty:
+            st.success("No churned customers found for the selected criteria.")
+        else:
+            for c in ["Orders", "Amount", "LastOrder"]:
+                df_churn[c] = pd.to_numeric(df_churn[c], errors="coerce").fillna(0)
+
+            # ── KPIs ──────────────────────────────────────────────────────────
+            k1, k2, k3, k4 = st.columns(4)
+            k1.markdown(f'''<div class="metric-card">
+                <div class="label">Churned Customers</div>
+                <div class="value">{len(df_churn):,}</div></div>''', unsafe_allow_html=True)
+            k2.markdown(f'''<div class="metric-card">
+                <div class="label">Total Lost Revenue</div>
+                <div class="value">PKR {df_churn["Amount"].sum():,.0f}</div></div>''', unsafe_allow_html=True)
+            k3.markdown(f'''<div class="metric-card">
+                <div class="label">Avg Orders / Customer</div>
+                <div class="value">{df_churn["Orders"].mean():.1f}</div></div>''', unsafe_allow_html=True)
+            k4.markdown(f'''<div class="metric-card">
+                <div class="label">Avg Days Since Last Order</div>
+                <div class="value">{df_churn["LastOrder"].mean():.0f} days</div></div>''', unsafe_allow_html=True)
+
+            # ── Charts ────────────────────────────────────────────────────────
+            ch1, ch2 = st.columns(2)
+
+            with ch1:
+                st.markdown("<div class='section-title'>Orders Distribution</div>", unsafe_allow_html=True)
+                order_dist = df_churn["Orders"].value_counts().reset_index()
+                order_dist.columns = ["Orders", "Customers"]
+                order_dist = order_dist.sort_values("Orders")
+                fig_od = px.bar(order_dist, x="Orders", y="Customers",
+                                color_discrete_sequence=[PALETTE[0]],
+                                labels={"Orders": "No. of Orders", "Customers": "No. of Customers"},
+                                text="Customers")
+                fig_od.update_traces(textposition="outside", textfont=dict(size=10))
+                fig_od.update_layout(title="Churned Customers by Order Count")
+                st.plotly_chart(apply_theme(fig_od), use_container_width=True)
+
+            with ch2:
+                st.markdown("<div class='section-title'>Days Since Last Order</div>", unsafe_allow_html=True)
+                bins = [30, 60, 90, 120, 180, 365, 9999]
+                labels_bins = ["30–60d", "61–90d", "91–120d", "121–180d", "181–365d", "365d+"]
+                df_churn["Inactivity Band"] = pd.cut(
+                    df_churn["LastOrder"], bins=bins, labels=labels_bins, right=True
+                )
+                band_grp = df_churn.groupby("Inactivity Band", observed=True).size().reset_index(name="Customers")
+                fig_band = px.bar(band_grp, x="Inactivity Band", y="Customers",
+                                  color_discrete_sequence=[PALETTE[4]],
+                                  labels={"Inactivity Band": "Days Since Last Order"},
+                                  text="Customers")
+                fig_band.update_traces(textposition="outside", textfont=dict(size=10))
+                fig_band.update_layout(title="Inactivity Bands")
+                st.plotly_chart(apply_theme(fig_band), use_container_width=True)
+
+            # Spend scatter
+            st.markdown("<div class='section-title'>Spend vs Inactivity</div>", unsafe_allow_html=True)
+            fig_sc = px.scatter(
+                df_churn, x="LastOrder", y="Amount",
+                size=df_churn["Orders"].astype(float).tolist(),
+                color="Orders", color_continuous_scale="Reds",
+                hover_data=["Name", "Phone", "Orders"],
+                labels={"LastOrder": "Days Since Last Order", "Amount": "Total Spend (PKR)"},
+            )
+            fig_sc.update_coloraxes(showscale=False)
+            fig_sc.update_layout(title="Each bubble = 1 customer  |  Size = No. of Orders")
+            st.plotly_chart(apply_theme(fig_sc), use_container_width=True)
+
+            # ── Table ─────────────────────────────────────────────────────────
+            st.markdown("<div class='section-title'>Churned Customer List</div>", unsafe_allow_html=True)
+
+            # inline search
+            search = st.text_input("🔎 Search by name or phone", placeholder="Type to filter…")
+            df_display = df_churn[["Name","Phone","Orders","Amount","LastOrder"]].copy()
+            if search:
+                mask = (
+                    df_display["Name"].str.contains(search, case=False, na=False) |
+                    df_display["Phone"].astype(str).str.contains(search, na=False)
+                )
+                df_display = df_display[mask]
+
+            df_display.columns = ["Name","Phone","Orders","Total Spend (PKR)","Days Since Last Order"]
+            st.dataframe(
+                df_display.style.format({
+                    "Total Spend (PKR)": "PKR {:,.0f}",
+                    "Days Since Last Order": "{:.0f}",
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+            st.caption(f"Showing {len(df_display):,} of {len(df_churn):,} customers")
